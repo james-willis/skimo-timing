@@ -31,24 +31,25 @@ CREATE TABLE users (
     first_name          TEXT NOT NULL,
     last_name           TEXT NOT NULL,
     email               TEXT UNIQUE,
-    birth_year          INTEGER,
-    gender              TEXT,                      -- optional, if divisions depend on it
-    default_division_id INTEGER REFERENCES divisions(id),
+    default_division_id INTEGER REFERENCES divisions(id),   -- self-selected; divisions do not depend on age or gender
     created_at          INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
 );
 
--- A physical timing chip. Kept separate from users because chips get
--- replaced, lent out and reassigned; the history matters when debugging
--- a bad read. At most one *active* assignment per chip at a time.
+-- A physical timing chip. People keep one chip for life (often the same one
+-- they use for other racing), but chips get lost or replaced, so the
+-- assignment is a row with a window rather than a column on users. A chip
+-- has at most one owner at a time, and a user has at most one *active* chip,
+-- so a read resolves to exactly one person. To replace a chip: set
+-- unassigned_at on the old row and insert a new one.
 CREATE TABLE chips (
     chip_id        TEXT PRIMARY KEY,                -- the id the reader reports
     user_id        INTEGER REFERENCES users(id),
     assigned_at    INTEGER,
     unassigned_at  INTEGER,                         -- NULL = currently assigned
-    notes          TEXT
+    notes          TEXT                             -- 'lost 2026-01', 'from cx', ...
 );
 
-CREATE INDEX chips_active_user_idx ON chips (user_id) WHERE unassigned_at IS NULL;
+CREATE UNIQUE INDEX chips_one_active_per_user_idx ON chips (user_id) WHERE unassigned_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- Events
@@ -86,11 +87,9 @@ CREATE TABLE event_participants (
     user_id       INTEGER NOT NULL REFERENCES users(id),
     division_id   INTEGER NOT NULL REFERENCES divisions(id),
     bib_number    INTEGER,
-    chip_id       TEXT REFERENCES chips(chip_id),   -- optional per-event override (rental chips)
     registered_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
     UNIQUE (event_id, user_id),
     UNIQUE (event_id, bib_number),
-    UNIQUE (event_id, chip_id),
     FOREIGN KEY (event_id, division_id) REFERENCES event_divisions(event_id, division_id)
 );
 
@@ -113,8 +112,9 @@ CREATE TABLE chip_reads (
 CREATE INDEX chip_reads_event_time_idx ON chip_reads (event_id, read_at);
 CREATE INDEX chip_reads_event_chip_idx ON chip_reads (event_id, chip_id);
 
--- The resolved result: one row per participant per event. finish_at is the
--- chosen crossing (first read after the division start, after de-duping).
+-- The resolved result: one row per participant per event. Finish time only,
+-- no splits or laps. finish_at is the chosen crossing: the first read of the
+-- user's active chip after the division start.
 -- Places are not stored; they are computed from elapsed with window
 -- functions so a correction never leaves stale ranks behind.
 CREATE TABLE results (
