@@ -32,7 +32,7 @@ erDiagram
     users ||--o{ chips : "owns (one active at a time)"
     divisions ||--o{ users : "usual division"
     events ||--o{ event_divisions : "offers"
-    divisions ||--o{ event_divisions : ""
+    divisions ||--o{ event_divisions : "listed in"
     users ||--o{ event_participants : "registers"
     event_divisions ||--o{ event_participants : "races in"
     events ||--o{ chip_reads : "reader log"
