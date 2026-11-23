@@ -1,7 +1,17 @@
--- Skimo chip-timing schema sketch (Postgres flavored).
+-- Skimo chip-timing schema sketch (SQLite).
 -- Core idea: people, chips and divisions are reusable; an event binds them
 -- together through event_divisions and event_participants; timing data is
 -- stored twice, once raw (chip_reads) and once resolved (results).
+--
+-- Conventions:
+--   * Every timestamp is INTEGER milliseconds since the Unix epoch (UTC).
+--     Readers report ms, elapsed arithmetic is plain subtraction, and
+--     ordering is exact. Format for display with datetime(ms/1000,'unixepoch').
+--   * Dates with no time of day are TEXT 'YYYY-MM-DD'.
+--   * Run `PRAGMA foreign_keys = ON;` on every connection; SQLite does not
+--     enforce foreign keys unless asked.
+
+PRAGMA foreign_keys = ON;
 
 -- ---------------------------------------------------------------------------
 -- Reference data
@@ -10,32 +20,32 @@
 -- A division is a category racers compete in (e.g. Race, Rec, Heavy Metal,
 -- Youth). It is global so it can be reused across events and reported on.
 CREATE TABLE divisions (
-    id          bigserial PRIMARY KEY,
-    name        text NOT NULL UNIQUE,
-    description text,
-    sort_order  integer NOT NULL DEFAULT 0
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE users (
-    id                  bigserial PRIMARY KEY,
-    first_name          text NOT NULL,
-    last_name           text NOT NULL,
-    email               text UNIQUE,
-    birth_year          integer,
-    gender              text,                      -- optional, if divisions depend on it
-    default_division_id bigint REFERENCES divisions(id),
-    created_at          timestamptz NOT NULL DEFAULT now()
+    id                  INTEGER PRIMARY KEY,
+    first_name          TEXT NOT NULL,
+    last_name           TEXT NOT NULL,
+    email               TEXT UNIQUE,
+    birth_year          INTEGER,
+    gender              TEXT,                      -- optional, if divisions depend on it
+    default_division_id INTEGER REFERENCES divisions(id),
+    created_at          INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
 );
 
 -- A physical timing chip. Kept separate from users because chips get
 -- replaced, lent out and reassigned; the history matters when debugging
 -- a bad read. At most one *active* assignment per chip at a time.
 CREATE TABLE chips (
-    chip_id        text PRIMARY KEY,                -- the id the reader reports
-    user_id        bigint REFERENCES users(id),
-    assigned_at    timestamptz,
-    unassigned_at  timestamptz,                     -- NULL = currently assigned
-    notes          text
+    chip_id        TEXT PRIMARY KEY,                -- the id the reader reports
+    user_id        INTEGER REFERENCES users(id),
+    assigned_at    INTEGER,
+    unassigned_at  INTEGER,                         -- NULL = currently assigned
+    notes          TEXT
 );
 
 CREATE INDEX chips_active_user_idx ON chips (user_id) WHERE unassigned_at IS NULL;
@@ -45,25 +55,25 @@ CREATE INDEX chips_active_user_idx ON chips (user_id) WHERE unassigned_at IS NUL
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE events (
-    id            bigserial PRIMARY KEY,
-    name          text NOT NULL,
-    event_date    date NOT NULL,
-    location      text,
-    description   text,
-    course_notes  text,
-    distance_m    integer,
-    vertical_m    integer,
-    status        text NOT NULL DEFAULT 'draft'
+    id            INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL,
+    event_date    TEXT NOT NULL,                    -- 'YYYY-MM-DD'
+    location      TEXT,
+    description   TEXT,
+    course_notes  TEXT,
+    distance_m    INTEGER,
+    vertical_m    INTEGER,
+    status        TEXT NOT NULL DEFAULT 'draft'
                   CHECK (status IN ('draft', 'open', 'closed', 'finished', 'cancelled')),
-    created_at    timestamptz NOT NULL DEFAULT now()
+    created_at    INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
 );
 
 -- Which divisions an event offers. Carries the per-event start time so that
--- wave starts work: elapsed = finish_at - start_at for that division.
+-- wave starts work: elapsed_ms = finish_at - start_at for that division.
 CREATE TABLE event_divisions (
-    event_id    bigint NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    division_id bigint NOT NULL REFERENCES divisions(id),
-    start_at    timestamptz,                        -- NULL until the gun goes
+    event_id    INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    division_id INTEGER NOT NULL REFERENCES divisions(id),
+    start_at    INTEGER,                            -- NULL until the gun goes
     PRIMARY KEY (event_id, division_id)
 );
 
@@ -71,13 +81,13 @@ CREATE TABLE event_divisions (
 -- their division for an event" lives: division_id here overrides
 -- users.default_division_id, and must be one the event actually offers.
 CREATE TABLE event_participants (
-    id            bigserial PRIMARY KEY,
-    event_id      bigint NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    user_id       bigint NOT NULL REFERENCES users(id),
-    division_id   bigint NOT NULL REFERENCES divisions(id),
-    bib_number    integer,
-    chip_id       text REFERENCES chips(chip_id),   -- optional per-event override (rental chips)
-    registered_at timestamptz NOT NULL DEFAULT now(),
+    id            INTEGER PRIMARY KEY,
+    event_id      INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    user_id       INTEGER NOT NULL REFERENCES users(id),
+    division_id   INTEGER NOT NULL REFERENCES divisions(id),
+    bib_number    INTEGER,
+    chip_id       TEXT REFERENCES chips(chip_id),   -- optional per-event override (rental chips)
+    registered_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
     UNIQUE (event_id, user_id),
     UNIQUE (event_id, bib_number),
     UNIQUE (event_id, chip_id),
@@ -92,12 +102,12 @@ CREATE TABLE event_participants (
 -- crossing and sometimes see unknown chips, so this is an append-only log
 -- that results are derived from, never edited by hand.
 CREATE TABLE chip_reads (
-    id         bigserial PRIMARY KEY,
-    event_id   bigint NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    chip_id    text NOT NULL,                       -- deliberately no FK: unknown chips happen
-    reader_id  text,                                -- which antenna/box, if more than one
-    read_at    timestamptz NOT NULL,
-    raw        jsonb                                -- whatever else the reader sent
+    id         INTEGER PRIMARY KEY,
+    event_id   INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    chip_id    TEXT NOT NULL,                       -- deliberately no FK: unknown chips happen
+    reader_id  TEXT,                                -- which antenna/box, if more than one
+    read_at    INTEGER NOT NULL,
+    raw        TEXT                                 -- JSON: whatever else the reader sent
 );
 
 CREATE INDEX chip_reads_event_time_idx ON chip_reads (event_id, read_at);
@@ -105,21 +115,21 @@ CREATE INDEX chip_reads_event_chip_idx ON chip_reads (event_id, chip_id);
 
 -- The resolved result: one row per participant per event. finish_at is the
 -- chosen crossing (first read after the division start, after de-duping).
--- Places are not stored; they are computed from finish/elapsed with window
+-- Places are not stored; they are computed from elapsed with window
 -- functions so a correction never leaves stale ranks behind.
 CREATE TABLE results (
-    participant_id bigint PRIMARY KEY REFERENCES event_participants(id) ON DELETE CASCADE,
-    event_id       bigint NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    finish_at      timestamptz,
-    elapsed        interval,                        -- finish_at - event_divisions.start_at
-    status         text NOT NULL DEFAULT 'finished'
+    participant_id INTEGER PRIMARY KEY REFERENCES event_participants(id) ON DELETE CASCADE,
+    event_id       INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    finish_at      INTEGER,
+    elapsed_ms     INTEGER,                         -- finish_at - event_divisions.start_at
+    status         TEXT NOT NULL DEFAULT 'finished'
                    CHECK (status IN ('finished', 'dnf', 'dns', 'dsq')),
-    chip_read_id   bigint REFERENCES chip_reads(id),  -- provenance for the finish
-    note           text,                            -- why a time was adjusted, etc.
-    updated_at     timestamptz NOT NULL DEFAULT now()
+    chip_read_id   INTEGER REFERENCES chip_reads(id),  -- provenance for the finish
+    note           TEXT,                            -- why a time was adjusted, etc.
+    updated_at     INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
 );
 
-CREATE INDEX results_event_elapsed_idx ON results (event_id, elapsed);
+CREATE INDEX results_event_elapsed_idx ON results (event_id, elapsed_ms);
 
 -- ---------------------------------------------------------------------------
 -- Ranking (overall and by division) as a view
@@ -135,11 +145,17 @@ SELECT
     ep.bib_number,
     r.status,
     r.finish_at,
-    r.elapsed,
+    r.elapsed_ms,
+    -- 'H:MM:SS.mmm' for display
+    printf('%d:%02d:%02d.%03d',
+           r.elapsed_ms / 3600000,
+           (r.elapsed_ms / 60000) % 60,
+           (r.elapsed_ms / 1000) % 60,
+           r.elapsed_ms % 1000)                                              AS elapsed,
     RANK() OVER (PARTITION BY r.event_id
-                 ORDER BY (r.status <> 'finished'), r.elapsed)                 AS overall_place,
+                 ORDER BY (r.status <> 'finished'), r.elapsed_ms)              AS overall_place,
     RANK() OVER (PARTITION BY r.event_id, ep.division_id
-                 ORDER BY (r.status <> 'finished'), r.elapsed)                 AS division_place
+                 ORDER BY (r.status <> 'finished'), r.elapsed_ms)              AS division_place
 FROM results r
 JOIN event_participants ep ON ep.id = r.participant_id
 JOIN users u               ON u.id = ep.user_id;
